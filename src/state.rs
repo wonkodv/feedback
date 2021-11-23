@@ -1,7 +1,11 @@
 use rand::Rng;
 use std::{collections::HashMap, time::Instant};
 
-type Id = u128;
+type Id = u64;
+
+pub fn new_user_id() -> Id {
+    rand::thread_rng().gen()
+}
 
 #[derive(Debug)]
 pub struct Vote {
@@ -58,6 +62,10 @@ impl Session {
         v.sort();
         v
     }
+
+    pub fn vote(&mut self, user_id: Id, vote: String) {
+        self.votes_by_user.insert(user_id, Vote::new(vote));
+    }
 }
 
 #[derive(Debug, Default)]
@@ -73,12 +81,19 @@ impl State {
             .insert(session.private_id, session.public_id);
         let pub_id = session.public_id;
         self.session_by_public_key.insert(pub_id, session);
-        let session = self.session_by_public_key.get_mut(&pub_id).unwrap();
+        let session = self
+            .session_by_public_key
+            .get_mut(&pub_id)
+            .expect("just inserted");
 
         session
     }
 
-    pub fn get_session_by_private(&mut self, private_id: Id) -> Option<&mut Session> {
+    pub fn session_by_public_key(&mut self, public_id: Id) -> Option<&mut Session> {
+        self.session_by_public_key.get_mut(&public_id)
+    }
+
+    pub fn session_by_private_key(&mut self, private_id: Id) -> Option<&mut Session> {
         self.session_by_public_key
             .get_mut(self.pub_by_private.get(&private_id)?)
     }

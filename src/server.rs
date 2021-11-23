@@ -9,15 +9,56 @@ use hyper::header::HeaderValue;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Method, Request, Response, Server, StatusCode};
 
-use crate::state::{Session, State};
+use crate::state::{self, Session, State, };
 use url::form_urlencoded;
+
+use thiserror;
+
+#[derive(Debug, thiserror::Error)]
+enum ServerError {
+    #[error("User Error {0}")]
+    UserError(String),
+
+    #[error("Bad Request {0}")]
+    ApiMisuse(String),
+
+    #[error("Error {0}")]
+    ProgramError(String),
+
+    #[error("HyperError {0}")]
+    HyperError(#[from] hyper::Error),
+}
+use ServerError::*;
 
 async fn handle_request(
     state: Rc<RefCell<State>>,
     req: Request<Body>,
     response: &mut Response<Body>,
-) -> Result<(), Box<dyn Error>> {
-    response.headers_mut().insert("Content-Type", HeaderValue::from_static("text/html"));
+) -> Result<(), ServerError> {
+    let mut req = req;
+    response
+        .headers_mut()
+        .insert("Content-Type", HeaderValue::from_static("text/html"));
+
+    let post_params: HashMap<String, String>;
+    if req.method() == Method::POST {
+        let post_body = hyper::body::to_bytes(req.body_mut()).await?;
+        post_params = form_urlencoded::parse(post_body.as_ref())
+            .into_owned()
+            .collect();
+    } else {
+        post_params = HashMap::new();
+    }
+
+    let get_params: HashMap<String, String>;
+    if let Some(query) = req.uri().query() {
+        get_params = form_urlencoded::parse(query.as_bytes())
+            .into_owned()
+            .collect();
+    } else {
+        get_params = HashMap::new();
+    }
+
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/") => {
             *response.body_mut() = Body::from(
@@ -31,22 +72,20 @@ async fn handle_request(
             Ok(())
         }
         (&Method::POST, "/new") => {
-            let params = hyper::body::to_bytes(req).await.unwrap();
-            let params: HashMap<String, String> = form_urlencoded::parse(params.as_ref())
-                .into_owned()
-                .collect();
-
             {
                 let mut state = state.borrow_mut();
-                let session =
-                    state.new_session(&params.get("title").unwrap_or(&"no title".to_owned()));
+                let session = state.new_session(
+                    &post_params
+                        .get("title")
+                        .ok_or_else(|| ApiMisuse("title missing".to_string()))?,
+                );
 
                 *response.body_mut() = Body::from(format!(
                     r#"
                     <form method=POST action="/update" target=iframe>
                         <input type="hidden" name="private" value="{}">
                     </form>
-                    <iframe name=iframe src=/update>
+                    <iframe name=iframe>
                     </iframe>
                     <script>
                         function update() {{document.querySelector("form").submit();}}
@@ -54,7 +93,7 @@ async fn handle_request(
                     </script>
 
                     New Session named {} 
-                    Vote <a href="/vote#{}">here</a>
+                    Vote <a href="/vote?public={}">here</a>
                 "#,
                     session.private_id(),
                     session.title(),
@@ -64,15 +103,17 @@ async fn handle_request(
             Ok(())
         }
         (&Method::POST, "/update") => {
-            let params = hyper::body::to_bytes(req).await.unwrap();
-            let params: HashMap<String, String> = form_urlencoded::parse(params.as_ref())
-                .into_owned()
-                .collect();
             {
                 let mut state = state.borrow_mut();
                 let session = state
-                    .get_session_by_private(params.get("private").unwrap().parse().unwrap())
-                    .unwrap();
+                    .session_by_private_key(
+                        post_params
+                            .get("private")
+                            .ok_or_else(|| ApiMisuse("private id missing".to_string()))?
+                            .parse()
+                            .map_err(|e| ApiMisuse(format!("private id not a number {}", e)))?,
+                    )
+                    .ok_or_else(|| ApiMisuse("Bad Id".to_string()))?;
                 let mut body = String::new();
                 body.push_str("<ul>");
                 for (v, c) in session.votes() {
@@ -83,7 +124,61 @@ async fn handle_request(
             }
             Ok(())
         }
-        r => Err(format!("no route {:?}", r).into()),
+        (&Method::GET, "/vote") => {
+            let user =  state::new_user_id();
+            *response.body_mut() = Body::from(format!(
+                r#"
+                    <form method=POST action="/vote" target=iframe>
+                        <input type="hidden" name="public" value="{}">
+                        <input type="hidden" name="user" value="{}">
+                        <input type=submit name=vote value="&#x1f44e;" >
+                        <input type=submit name=vote value="&#x1f44d;" >
+                    </form>
+                    <iframe name=iframe>
+                    </iframe>
+                "#,
+                get_params
+                    .get("public")
+                    .ok_or_else(|| ApiMisuse("id missing".to_string()))?,
+                user,
+            ));
+            Ok(())
+        }
+        (&Method::POST, "/vote") => {
+            let mut state = state.borrow_mut();
+
+            let vote = post_params
+                .get("vote")
+                .ok_or_else(|| ApiMisuse("vote missing".to_string()))?;
+            let user_id = post_params
+                .get("user")
+                .ok_or_else(|| ApiMisuse("user missing".to_string()))?
+                .parse()
+                .map_err(|e| ApiMisuse(format!("user id wrong {}", e)))?
+                ;
+            let public_id = post_params
+                .get("public")
+                .ok_or_else(|| ApiMisuse("id missing".to_string()))?
+                .parse()
+                .map_err(|e| ApiMisuse(format!("Session Id wrong {}", e)))?
+                ;
+
+            let session = state.session_by_public_key(public_id)
+                .ok_or_else(|| ApiMisuse("no such session".to_string()))?
+                ;
+
+            session.vote(user_id, vote.to_owned());
+
+
+            *response.body_mut() = Body::from(format!(
+                r#"
+                    You changed your vote to {}
+                "#,
+                vote,
+            ));
+            Ok(())
+        }
+        r => Err(ApiMisuse(format!("no path {:?}", r))),
     }
 }
 
