@@ -21,7 +21,7 @@ impl Vote {
 }
 
 #[derive(Debug)]
-pub struct Session {
+pub struct Poll {
     votes_by_user: HashMap<Id, Vote>,
 
     private_id: Id,
@@ -29,7 +29,7 @@ pub struct Session {
     title: String,
 }
 
-impl Session {
+impl Poll {
     pub fn new(title: &str) -> Self {
         let mut rng = rand::thread_rng();
         let private_id = rng.gen();
@@ -66,35 +66,38 @@ impl Session {
     pub fn vote(&mut self, user_id: Id, vote: String) {
         self.votes_by_user.insert(user_id, Vote::new(vote));
     }
+    pub fn clear(&mut self) {
+        self.votes_by_user.clear();
+    }
 }
 
 #[derive(Debug, Default)]
 pub struct State {
-    session_by_public_key: HashMap<Id, Session>,
+    poll_by_public_key: HashMap<Id, Poll>,
     pub_by_private: HashMap<Id, Id>,
 }
 
 impl State {
-    pub fn new_session(&mut self, title: &str) -> &mut Session {
-        let session = Session::new(title);
+    pub fn new_poll(&mut self, title: &str) -> &mut Poll {
+        let poll = Poll::new(title);
         self.pub_by_private
-            .insert(session.private_id, session.public_id);
-        let pub_id = session.public_id;
-        self.session_by_public_key.insert(pub_id, session);
-        let session = self
-            .session_by_public_key
+            .insert(poll.private_id, poll.public_id);
+        let pub_id = poll.public_id;
+        self.poll_by_public_key.insert(pub_id, poll);
+        let poll = self
+            .poll_by_public_key
             .get_mut(&pub_id)
             .expect("just inserted");
 
-        session
+        poll
     }
 
-    pub fn session_by_public_key(&mut self, public_id: Id) -> Option<&mut Session> {
-        self.session_by_public_key.get_mut(&public_id)
+    pub fn poll_by_public_key(&mut self, public_id: Id) -> Option<&mut Poll> {
+        self.poll_by_public_key.get_mut(&public_id)
     }
 
-    pub fn session_by_private_key(&mut self, private_id: Id) -> Option<&mut Session> {
-        self.session_by_public_key
+    pub fn poll_by_private_key(&mut self, private_id: Id) -> Option<&mut Poll> {
+        self.poll_by_public_key
             .get_mut(self.pub_by_private.get(&private_id)?)
     }
 }
